@@ -1,7 +1,12 @@
 import json
+import re
 from typing import List, Union
 import inquirer
 from helper.models import BaseExecutor, RBDDevice
+
+def _natural_sort_key(s: str):
+    """자연 정렬 키: 'rp2' < 'rp10' < 'rp100'"""
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', s)]
 
 class CephRBD(BaseExecutor):
     def check_cluster(self) -> None:
@@ -18,7 +23,7 @@ class CephRBD(BaseExecutor):
         if result.returncode != 0:
             self.log_error(f"풀 '{pool}'이(가) 존재하지 않거나 접근 불가")
             return []
-        return [img for img in result.stdout.split() if img]
+        return sorted([img for img in result.stdout.split() if img], key=_natural_sort_key)
 
     def rbd_showmapped(self) -> str:
         """RBD 매핑 정보를 조회합니다."""
