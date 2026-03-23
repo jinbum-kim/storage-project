@@ -277,7 +277,11 @@ class Auto(BaseExecutor):
                     self.log_error(f"✗ {docker_image} 다운로드 실패")
                     failed_tasks.append((docker_image, rbd_image, "이미지 다운로드 실패"))
 
-            if rbd_success == len(docker_images):
+            # pull 후 실제 저장 검증
+            if rbd_success > 0 and not self._verify_docker_images(docker_images, mounted_path):
+                self.log_warning(f"  {pool}/{rbd_image}: 이미지 pull은 성공했으나 저장 검증 실패")
+                partial_rbd_images.append(rbd_image)
+            elif rbd_success == len(docker_images):
                 completed_rbd_images.append(rbd_image)
             elif rbd_success > 0:
                 partial_rbd_images.append(rbd_image)
@@ -370,18 +374,27 @@ class Auto(BaseExecutor):
     def _change_docker_root(self, mount_path: str) -> bool:
         """Docker Root Directory를 변경합니다. 이미 설정된 경우 스킵합니다."""
         try:
+            docker_path = f"{mount_path}/root/docker"
+
             # 현재 Docker Root Directory 확인
             current_docker_root = self.docker._check_docker_config().strip().strip("'\"")
-            docker_path = f"{mount_path}/root/docker"
-            
+
             # 이미 올바른 경로로 설정된 경우 스킵
             if current_docker_root == docker_path:
                 self.log_info(f"Docker Root Directory가 이미 {docker_path}로 설정되어 있습니다.")
                 return True
-            
+
             # 설정이 다른 경우에만 변경
             self.log_info(f"Docker Root Directory를 {docker_path}로 변경합니다...")
             self.docker._change_docker_root_directory(mount_path)
+
+            # 변경 후 검증: Docker가 새 root로 기동되었는지 확인
+            actual_root = self.docker._check_docker_config().strip().strip("'\"")
+            if actual_root != docker_path:
+                self.log_error(f"Docker Root Directory 검증 실패: 기대값={docker_path}, 실제값={actual_root}")
+                return False
+
+            self.log_success(f"Docker Root Directory 검증 완료: {actual_root}")
             return True
         except Exception as e:
             self.log_error(f"Docker Root Directory 변경 중 오류: {e}")
@@ -391,6 +404,16 @@ class Auto(BaseExecutor):
         """Docker 이미지를 다운로드합니다."""
         result = self._run(["docker", "pull", image], capture_output=False)
         return result.returncode == 0
+
+    def _verify_docker_images(self, docker_images: List[str], mount_path: str) -> bool:
+        """Docker 이미지가 실제 해당 경로에 저장되었는지 검증합니다."""
+        docker_root = f"{mount_path}/root/docker"
+        # overlay2 디렉토리 존재 여부로 이미지 저장 확인
+        check = self._run(["sudo", "ls", f"{docker_root}/overlay2"])
+        if check.returncode != 0 or not check.stdout.strip():
+            self.log_warning(f"  {docker_root}에 이미지 데이터가 없습니다.")
+            return False
+        return True
 
     def _show_deployment_summary(self, total: int, success: int, failed_tasks: List[Tuple[str, str, str]],
                                    pool: str = "", completed: List[str] = None, partial: List[str] = None) -> None:
