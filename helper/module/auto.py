@@ -1,10 +1,10 @@
 import json
 from typing import List, Tuple
 import inquirer
-from models import BaseExecutor, load_favorites_config
-from module.ceph import CephRBD
-from module.fs_mount import FsMount
-from module.docker import Docker
+from helper.models import BaseExecutor, load_favorites_config
+from helper.module.ceph import CephRBD
+from helper.module.fs_mount import FsMount
+from helper.module.docker import Docker
 
 class Auto(BaseExecutor):
     def __init__(self, ceph_rbd: CephRBD, fs_mount: FsMount, docker: Docker):

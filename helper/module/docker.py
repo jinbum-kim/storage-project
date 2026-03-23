@@ -1,5 +1,5 @@
-from models import BaseExecutor, load_favorites_config
-from module.fs_mount import FsMount
+from helper.models import BaseExecutor, load_favorites_config
+from helper.module.fs_mount import FsMount
 import inquirer
 
 class Docker(BaseExecutor):
@@ -32,7 +32,7 @@ class Docker(BaseExecutor):
         self.log_info(f"현재 Docker Root Directory: {current_docker_root}")
 
         # 2. 현재 마운트된 RBD 디바이스 목록 조회 및 선택
-        from module.ceph import CephRBD
+        from helper.module.ceph import CephRBD
         ceph_rbd = CephRBD()
         fs_mount = FsMount(ceph_rbd)
         mounted_devices = fs_mount.get_mounted_rbd_devices()

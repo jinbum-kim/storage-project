@@ -1,8 +1,8 @@
 import os
 from typing import List, Union
 import inquirer
-from models import BaseExecutor, RBDDevice
-from module.ceph import CephRBD
+from helper.models import BaseExecutor, RBDDevice
+from helper.module.ceph import CephRBD
 
 class FsMount(BaseExecutor):
     def __init__(self, rbd: CephRBD):

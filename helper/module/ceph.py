@@ -1,7 +1,7 @@
 import json
 from typing import List, Union
 import inquirer
-from models import BaseExecutor, RBDDevice
+from helper.models import BaseExecutor, RBDDevice
 
 class CephRBD(BaseExecutor):
     def check_cluster(self) -> None:
