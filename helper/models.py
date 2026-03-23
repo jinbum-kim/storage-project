@@ -18,13 +18,20 @@ class RBDDevice(NamedTuple):
     def display_name(self) -> str:
         return f"{self.full_name} -> {self.device} -> {self.mountpoint or '(unmounted)'}"
 
+_config_path: Optional[str] = None
+
+def set_config_path(path: str) -> None:
+    """config.json 경로를 설정합니다."""
+    global _config_path
+    _config_path = path
+
 def load_favorites_config() -> Dict[str, List[str]]:
     """config.json에서 즐겨찾기 이미지 목록을 로드합니다."""
     try:
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+        config_path = _config_path or os.path.join(os.getcwd(), "config.json")
         if not os.path.exists(config_path):
             return {}
-        
+
         with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
             return config.get("favorite", {})

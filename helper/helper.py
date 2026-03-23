@@ -7,7 +7,7 @@ from helper.module.ceph import CephRBD
 from helper.module.fs_mount import FsMount
 from helper.module.docker import Docker
 from helper.module.auto import Auto
-from helper.models import BaseExecutor
+from helper.models import BaseExecutor, set_config_path
 
 class StorageHelper(BaseExecutor):
     """스토리지 관리 도우미 클래스"""
@@ -157,8 +157,11 @@ class StorageHelper(BaseExecutor):
 
 @click.command()
 @click.option("--debug", is_flag=True, help="디버그 모드 활성화")
-def storage_helper(debug: bool = False) -> None:
+@click.option("--config", type=click.Path(exists=True), default=None, help="config.json 경로 (기본: ./config.json)")
+def storage_helper(debug: bool = False, config: str = None) -> None:
     """스토리지 관리 도우미 프로그램"""
+    if config:
+        set_config_path(config)
     helper = StorageHelper(debug=debug)
     helper.run()
 
