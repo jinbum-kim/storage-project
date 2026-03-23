@@ -88,7 +88,10 @@ class Docker(BaseExecutor):
                 new_exec_start = f"ExecStart=/usr/bin/dockerd --data-root {docker_path} -H fd:// --containerd=/run/containerd/containerd.sock"
                 
                 self.log_info("Docker 서비스 설정을 변경합니다...")
-                self._run(["sudo", "cp", service_file, f"{service_file}.bak"])
+                # 최초 원본 백업이 없을 때만 .bak 생성 (덮어쓰기 방지)
+                check_bak = self._run(["sudo", "test", "-f", f"{service_file}.bak"])
+                if check_bak.returncode != 0:
+                    self._run(["sudo", "cp", service_file, f"{service_file}.bak"])
                 
                 # Python으로 파일 직접 수정
                 self._modify_docker_service_file(service_file, new_exec_start)
@@ -224,7 +227,7 @@ class Docker(BaseExecutor):
         for img in images:
             self.log_info(f"  - {img}")
         
-        if not inquirer.confirm("다운로드를 시작하시겠습니까?", default=True):
+        if not inquirer.confirm("다운로드를 시작하시겠습니까?", default=False):
             self.log_info("다운로드가 취소되었습니다.")
             return
         
@@ -235,7 +238,7 @@ class Docker(BaseExecutor):
         for i, image_name in enumerate(images, 1):
             self.log_info(f"[{i}/{len(images)}] {image_name} 다운로드 중...")
             
-            res = self._run(["docker", "pull", image_name])
+            res = self._run(["docker", "pull", image_name], capture_output=False)
             if res.returncode == 0:
                 self.log_success(f"✓ {image_name} 다운로드 완료")
                 success_count += 1
@@ -296,24 +299,47 @@ class Docker(BaseExecutor):
         for i, img in enumerate(selected_images, 1):
             self.log_info(f"{i:2d}. {img}")
         
-        if not inquirer.confirm(f"{selected_category} 카테고리의 {len(selected_images)}개 이미지를 다운로드하시겠습니까?", default=True):
+        if not inquirer.confirm(f"{selected_category} 카테고리의 {len(selected_images)}개 이미지를 다운로드하시겠습니까?", default=False):
             return []
         
         return selected_images
 
     def rm_image(self) -> None:
         """Docker Image 삭제"""
-        res = self._run(["docker", "images"])
+        res = self._run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}"])
         if res.returncode != 0:
             self.log_error("Docker Image 목록 조회 실패")
             return
-        
-        self.print_log(res.stdout)
-        
-        image_name = inquirer.text(message="삭제할 Docker Image 이름을 입력해주세요.").strip()
-        res = self._run(["docker", "rmi", image_name])
+
+        lines = [line for line in res.stdout.strip().splitlines() if line.strip()]
+        if not lines:
+            self.log_warning("삭제할 Docker Image가 없습니다.")
+            return
+
+        image_choices = []
+        for line in lines:
+            parts = line.split("\t")
+            name = parts[0]
+            size = parts[2] if len(parts) > 2 else ""
+            label = f"{name}  ({size})" if size else name
+            image_choices.append((label, name))
+
+        image_choices.append(("취소", "cancel"))
+
+        selected = inquirer.list_input(
+            message="삭제할 Docker Image 선택:",
+            choices=image_choices
+        )
+        if selected == "cancel":
+            return
+
+        if not inquirer.confirm(f"{selected} 이미지를 삭제하시겠습니까?", default=False):
+            self.log_info("삭제가 취소되었습니다.")
+            return
+
+        res = self._run(["docker", "rmi", selected])
         if res.returncode != 0:
             self.log_error("Docker Image 삭제 실패")
             return
-        
-        self.log_success(f"{image_name} 삭제 완료")
+
+        self.log_success(f"{selected} 삭제 완료")

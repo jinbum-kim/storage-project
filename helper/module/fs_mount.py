@@ -31,19 +31,19 @@ class FsMount(BaseExecutor):
             self.log_warning("마운트 가능한 디바이스가 없습니다.")
             return
 
-        choices: List[tuple[str, Union[RBDDevice, int]]] = [(device.display_name, device) for device in unmounted]
-        choices.append(("취소", -1))
+        choices: List[tuple[str, Union[RBDDevice, str]]] = [(device.display_name, device) for device in unmounted]
+        choices.append(("취소", "cancel"))
 
         sel = inquirer.list_input(
             message="마운트할 디바이스 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
             choices=choices
         )
-        if sel == -1:
+        if sel == "cancel":
             return
 
         device = sel
         default_mp = f"/mnt/{device.full_name}"
-        mp = input(f"마운트 경로 입력 (기본: {default_mp}): ") or default_mp
+        mp = inquirer.text(message=f"마운트 경로 입력 (기본: {default_mp})").strip() or default_mp
         os.makedirs(mp, exist_ok=True)
 
         self._mount_device(device, mp)
@@ -63,7 +63,11 @@ class FsMount(BaseExecutor):
 
     def _handle_fs_type_error(self, device: RBDDevice, mountpoint: str) -> None:
         """파일시스템 타입 오류를 처리합니다."""
-        self.log_warning("파일 시스템 문제 발견, mkfs.ext4 실행")
+        self.log_warning(f"파일 시스템 문제 발견: {device.device}")
+        self.log_warning("mkfs.ext4를 실행하면 디바이스의 모든 데이터가 삭제됩니다.")
+        if not inquirer.confirm(f"{device.device}를 포맷하시겠습니까?", default=False):
+            self.log_info("포맷을 취소했습니다.")
+            return
         res_fs = self._run(["sudo", "mkfs.ext4", device.device])
         if res_fs.returncode != 0:
             self.log_error(f"mkfs.ext4 실패: {res_fs.stderr.strip()}")
@@ -87,14 +91,14 @@ class FsMount(BaseExecutor):
             self.log_warning("마운트 해제 가능한 디바이스가 없습니다.")
             return
 
-        choices: List[tuple[str, Union[RBDDevice, int]]] = [(device.display_name, device) for device in mounted]
-        choices.append(("취소", -1))
+        choices: List[tuple[str, Union[RBDDevice, str]]] = [(device.display_name, device) for device in mounted]
+        choices.append(("취소", "cancel"))
 
         sel = inquirer.list_input(
             message="마운트 해제할 디바이스 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
             choices=choices
         )
-        if sel == -1:
+        if sel == "cancel":
             return
 
         device = sel

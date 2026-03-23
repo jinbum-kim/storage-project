@@ -12,41 +12,42 @@ from helper.models import BaseExecutor, set_config_path
 class StorageHelper(BaseExecutor):
     """스토리지 관리 도우미 클래스"""
     
-    MENU_CHOICES: List[Tuple[str, int]] = [
+    MENU_CHOICES: List[Tuple[str, Union[str, int]]] = [
         ("Ceph RBD 설정", 1),
         ("파일시스템 마운트 설정", 2),
         ("Docker 설정", 3),
         ("자동화", 4),
-        ("나가기", -1)
+        ("나가기", "cancel")
     ]
 
-    CEPH_RBD_CHOICES: List[Tuple[str, Union[str, int]]] = [
+    CEPH_RBD_CHOICES: List[Tuple[str, str]] = [
         ("Ceph 클러스터 접근 여부 확인", "check"),
         ("RBD 매핑 설정", "map"),
         ("RBD 매핑 해제", "unmap"),
-        ("취소", -1)
+        ("취소", "cancel")
     ]
 
-    FS_MOUNT_CHOICES: List[Tuple[str, Union[str, int]]] = [
+    FS_MOUNT_CHOICES: List[Tuple[str, str]] = [
         ("마운트 설정 확인", "check"),
         ("마운트 설정", "mount"),
         ("마운트 해제", "unmount"),
-        ("취소", -1)
+        ("취소", "cancel")
     ]
 
-    DOCKER_CHOICES: List[Tuple[str, Union[str, int]]] = [
+    DOCKER_CHOICES: List[Tuple[str, str]] = [
         ("Docker Root Directory 확인", "check"),
         ("Docker Root Directory 변경", "change"),
         ("Docker Image 조회", "list"),
         ("Docker Image 추가", "pull"),
         ("Docker Image 삭제", "rmi"),
-        ("취소", -1)    
+        ("취소", "cancel")
     ]
 
-    AUTOMATIC_CHOICES: List[Tuple[str, Any]] = [
+    AUTOMATIC_CHOICES: List[Tuple[str, str]] = [
         ("Docker Image를 RBD에 자동 배포", "deploy_images"),
+        ("RBD Docker 정리 (cleanup)", "cleanup_docker"),
         ("파일시스템 초기화", "format_filesystem"),
-        ("취소", -1)
+        ("취소", "cancel")
     ]
 
     def __init__(self, debug: bool = False):
@@ -103,6 +104,8 @@ class StorageHelper(BaseExecutor):
         """자동화 관련 작업을 처리합니다."""
         if action == "deploy_images":
             self.auto.deploy_docker_images_to_rbd()
+        elif action == "cleanup_docker":
+            self.auto.cleanup_docker_from_rbd()
         elif action == "format_filesystem":
             self.auto.format_filesystem()
 
@@ -127,7 +130,7 @@ class StorageHelper(BaseExecutor):
                     choices=self.MENU_CHOICES
                 )
                 
-                if choice == -1:
+                if choice == "cancel":
                     break
 
                 submenu_choices = self._get_submenu_choices(choice)
@@ -139,7 +142,7 @@ class StorageHelper(BaseExecutor):
                     choices=submenu_choices
                 )
 
-                if submenu_action in {-1, None}:
+                if submenu_action in {"cancel", None}:
                     continue
 
                 action = self.actions.get(choice)

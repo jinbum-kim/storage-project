@@ -108,7 +108,7 @@ class Auto(BaseExecutor):
         for i, img in enumerate(selected_images, 1):
             self.log_info(f"{i:2d}. {img}")
         
-        if not inquirer.confirm(f"{selected_category} 카테고리의 {len(selected_images)}개 이미지를 배포하시겠습니까?", default=True):
+        if not inquirer.confirm(f"{selected_category} 카테고리의 {len(selected_images)}개 이미지를 배포하시겠습니까?", default=False):
             return []
         
         return selected_images
@@ -230,22 +230,25 @@ class Auto(BaseExecutor):
     def _execute_deployment(self, docker_images: List[str], pool: str, rbd_images: List[str]) -> None:
         """실제 배포를 실행합니다."""
         self.log_info("\n=== 배포 실행 시작 ===")
-        
+
         total_tasks = len(docker_images) * len(rbd_images)
         current_task = 0
         success_count = 0
         failed_tasks = []
-        
+        completed_rbd_images = []
+        partial_rbd_images = []
+
         for rbd_image in rbd_images:
             self.log_info(f"\n--- RBD 이미지: {pool}/{rbd_image} 처리 시작 ---")
-            
+            rbd_success = 0
+
             # RBD 매핑
             if not self._map_rbd_image(pool, rbd_image):
                 self.log_error(f"RBD 매핑 실패: {pool}/{rbd_image}")
                 failed_tasks.extend([(img, rbd_image, "RBD 매핑 실패") for img in docker_images])
                 current_task += len(docker_images)
                 continue
-            
+
             # 마운트
             mounted_path = self._mount_rbd_image(pool, rbd_image)
             if not mounted_path:
@@ -253,28 +256,34 @@ class Auto(BaseExecutor):
                 failed_tasks.extend([(img, rbd_image, "마운트 실패") for img in docker_images])
                 current_task += len(docker_images)
                 continue
-            
+
             # Docker Root Directory 변경
             if not self._change_docker_root(mounted_path):
                 self.log_error(f"Docker Root Directory 변경 실패: {mounted_path}")
                 failed_tasks.extend([(img, rbd_image, "Docker 설정 실패") for img in docker_images])
                 current_task += len(docker_images)
                 continue
-            
+
             # Docker 이미지들 다운로드
             for docker_image in docker_images:
                 current_task += 1
                 self.log_info(f"[{current_task}/{total_tasks}] {docker_image} -> {pool}/{rbd_image}")
-                
+
                 if self._pull_docker_image(docker_image):
                     self.log_success(f"✓ {docker_image} 다운로드 완료")
                     success_count += 1
+                    rbd_success += 1
                 else:
                     self.log_error(f"✗ {docker_image} 다운로드 실패")
                     failed_tasks.append((docker_image, rbd_image, "이미지 다운로드 실패"))
-        
+
+            if rbd_success == len(docker_images):
+                completed_rbd_images.append(rbd_image)
+            elif rbd_success > 0:
+                partial_rbd_images.append(rbd_image)
+
         # 결과 요약
-        self._show_deployment_summary(total_tasks, success_count, failed_tasks)
+        self._show_deployment_summary(total_tasks, success_count, failed_tasks, pool, completed_rbd_images, partial_rbd_images)
 
     def _map_rbd_image(self, pool: str, image: str) -> bool:
         """RBD 이미지를 매핑합니다. 이미 매핑된 경우 스킵합니다."""
@@ -380,15 +389,25 @@ class Auto(BaseExecutor):
 
     def _pull_docker_image(self, image: str) -> bool:
         """Docker 이미지를 다운로드합니다."""
-        # docker pull 명령 실행
-        result = self._run(["docker", "pull", image])
+        result = self._run(["docker", "pull", image], capture_output=False)
         return result.returncode == 0
 
-    def _show_deployment_summary(self, total: int, success: int, failed_tasks: List[Tuple[str, str, str]]) -> None:
+    def _show_deployment_summary(self, total: int, success: int, failed_tasks: List[Tuple[str, str, str]],
+                                   pool: str = "", completed: List[str] = None, partial: List[str] = None) -> None:
         """배포 결과 요약을 표시합니다."""
         self.log_info("\n=== 배포 결과 요약 ===")
         self.log_success(f"성공: {success}/{total}")
-        
+
+        if completed:
+            self.log_success(f"완료된 RBD 이미지 ({len(completed)}개):")
+            for img in completed:
+                self.log_success(f"  ✓ {pool}/{img}")
+
+        if partial:
+            self.log_warning(f"부분 완료된 RBD 이미지 ({len(partial)}개) — 수동 확인 필요:")
+            for img in partial:
+                self.log_warning(f"  △ {pool}/{img}")
+
         if failed_tasks:
             self.log_error(f"실패: {len(failed_tasks)}/{total}")
             for docker_img, rbd_img, reason in failed_tasks:
@@ -571,3 +590,99 @@ class Auto(BaseExecutor):
         
         if success > 0:
             self.log_info("초기화된 이미지를 마운트하려면 '파일시스템 마운트 설정' 메뉴를 사용하세요.")
+
+    def cleanup_docker_from_rbd(self) -> None:
+        """RBD 이미지 내 Docker 데이터를 정리합니다."""
+        self.log_info("=== RBD Docker 정리 (cleanup) 시작 ===")
+
+        # 1. RBD Pool 입력받기
+        pool = self._get_rbd_pool_input()
+        if not pool:
+            return
+
+        # 2. 정리할 RBD 이미지 선택
+        selected_rbd_images = self._select_rbd_images(pool)
+        if not selected_rbd_images:
+            return
+
+        # 3. 정리 계획 확인
+        if not self._confirm_cleanup_plan(pool, selected_rbd_images):
+            return
+
+        # 4. 실제 정리 실행
+        self._execute_cleanup(pool, selected_rbd_images)
+
+    def _confirm_cleanup_plan(self, pool: str, rbd_images: List[str]) -> bool:
+        """정리 계획을 확인합니다."""
+        self.log_warning("\n=== ⚠️  Docker 정리 계획 ===")
+        self.log_warning(f"Pool: {pool}")
+        self.log_warning(f"대상 RBD 이미지 ({len(rbd_images)}개):")
+        for img in rbd_images:
+            self.log_warning(f"  - {img}  →  /mnt/{pool}/{img}/root/docker 삭제")
+
+        self.log_error("⚠️  경고: 대상 RBD 이미지의 Docker 데이터가 영구적으로 삭제됩니다!")
+
+        return inquirer.confirm("정말로 정리를 진행하시겠습니까?", default=False)
+
+    def _execute_cleanup(self, pool: str, rbd_images: List[str]) -> None:
+        """실제 Docker 정리를 실행합니다."""
+        self.log_info("\n=== Docker 정리 실행 ===")
+
+        success_count = 0
+        failed_images = []
+
+        for i, image in enumerate(rbd_images, 1):
+            self.log_info(f"[{i}/{len(rbd_images)}] {pool}/{image} 정리 중...")
+
+            # 1. RBD 매핑
+            if not self._map_rbd_image(pool, image):
+                failed_images.append((image, "RBD 매핑 실패"))
+                continue
+
+            # 2. 마운트
+            mounted_path = self._mount_rbd_image(pool, image)
+            if not mounted_path:
+                failed_images.append((image, "마운트 실패"))
+                continue
+
+            # 3. Docker root 삭제
+            docker_root = f"{mounted_path}/root/docker"
+            result = self._run(["sudo", "rm", "-rf", docker_root])
+            if result.returncode != 0:
+                failed_images.append((image, f"Docker 디렉토리 삭제 실패"))
+                continue
+
+            self.log_success(f"  {docker_root} 삭제 완료")
+
+            # 4. 언마운트
+            umount_result = self._run(["sudo", "umount", "-l", mounted_path])
+            if umount_result.returncode != 0:
+                self.log_warning(f"  {mounted_path} 마운트 해제 실패")
+                failed_images.append((image, "마운트 해제 실패"))
+                continue
+
+            self.log_success(f"  {mounted_path} 마운트 해제 완료")
+
+            # 5. 언맵
+            device_path = self._find_rbd_device(pool, image)
+            if device_path:
+                unmap_result = self._run(["sudo", "rbd", "unmap", device_path])
+                if unmap_result.returncode != 0:
+                    self.log_warning(f"  {device_path} 매핑 해제 실패")
+                    failed_images.append((image, "매핑 해제 실패"))
+                    continue
+                self.log_success(f"  {device_path} 매핑 해제 완료")
+
+            success_count += 1
+
+        self._show_cleanup_summary(len(rbd_images), success_count, failed_images)
+
+    def _show_cleanup_summary(self, total: int, success: int, failed_images: List[Tuple[str, str]]) -> None:
+        """정리 결과 요약을 표시합니다."""
+        self.log_info("\n=== Docker 정리 결과 ===")
+        self.log_success(f"성공: {success}/{total}")
+
+        if failed_images:
+            self.log_error(f"실패: {len(failed_images)}/{total}")
+            for image, reason in failed_images:
+                self.log_error(f"  - {image}: {reason}")

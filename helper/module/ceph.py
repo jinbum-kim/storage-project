@@ -68,7 +68,10 @@ class CephRBD(BaseExecutor):
 
     def map_image(self) -> None:
         """선택한 RBD 이미지를 로컬 디바이스에 매핑합니다."""
-        pool = input("풀 이름 입력: ")
+        pool = inquirer.text(message="풀 이름 입력").strip()
+        if not pool:
+            self.log_warning("풀 이름이 입력되지 않았습니다.")
+            return
         images = self.list_images(pool)
         if not images:
             return
@@ -108,14 +111,14 @@ class CephRBD(BaseExecutor):
             self.log_warning("매핑 해제할 RBD 디바이스가 없습니다.")
             return
 
-        choices: List[tuple[str, Union[RBDDevice, int]]] = [(device.display_name, device) for device in devices]
-        choices.append(("취소", -1))
+        choices: List[tuple[str, Union[RBDDevice, str]]] = [(device.display_name, device) for device in devices]
+        choices.append(("취소", "cancel"))
 
         sel = inquirer.list_input(
             message="매핑 해제할 RBD 디바이스 선택:",
             choices=choices
         )
-        if sel == -1:
+        if sel == "cancel":
             return
 
         self._unmap_device(sel)
