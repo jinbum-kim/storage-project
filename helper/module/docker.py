@@ -85,7 +85,7 @@ class Docker(BaseExecutor):
                 self._run(["sudo", "mkdir", "-p", docker_path])
                 
                 # systemd 설정 파일 백업 및 수정
-                new_exec_start = f"ExecStart=/usr/bin/dockerd --data-root {docker_path} -H fd:// --containerd=/run/containerd/containerd.sock"
+                new_exec_start = f"ExecStart=/usr/bin/dockerd --data-root {docker_path} -H fd://"
                 
                 self.log_info("Docker 서비스 설정을 변경합니다...")
                 # 최초 원본 백업이 없을 때만 .bak 생성 (덮어쓰기 방지)

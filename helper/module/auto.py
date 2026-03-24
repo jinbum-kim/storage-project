@@ -229,11 +229,11 @@ class Auto(BaseExecutor):
 
     def _execute_deployment(self, docker_images: List[str], pool: str, rbd_images: List[str]) -> None:
         """실제 배포를 실행합니다.
-        docker pull → docker save → 각 RBD에 tar 파일을 직접 복사합니다.
-        Docker root 변경 없이 파일시스템 복사로 확실하게 배포합니다."""
+        docker pull → docker save → 각 RBD에 Docker root 변경(containerd 분리) → docker load.
+        --containerd 플래그를 제거하여 Docker가 자체 containerd를 data-root 아래에 생성하므로
+        모든 이미지 레이어가 RBD에 직접 저장됩니다."""
         self.log_info("\n=== 배포 실행 시작 ===")
         tar_path = "/tmp/storage-helper-images.tar"
-        tar_filename = "docker-images.tar"
         failed_rbds = []
         completed_rbds = []
 
@@ -259,12 +259,11 @@ class Auto(BaseExecutor):
             self.log_error("docker save 실패, 배포를 중단합니다.")
             return
 
-        # tar 파일 크기 확인
         size_result = self._run(["du", "-h", tar_path])
         if size_result.returncode == 0:
             self.log_success(f"  tar 파일 생성 완료: {size_result.stdout.split()[0]}")
 
-        # === Phase 3: 각 RBD에 tar 파일 복사 ===
+        # === Phase 3: 각 RBD에 Docker root 변경 + docker load ===
         self.log_info(f"\n--- Phase 3: {len(rbd_images)}개 RBD에 배포 ---")
         for i, rbd_image in enumerate(rbd_images, 1):
             self.log_info(f"\n  [{i}/{len(rbd_images)}] {pool}/{rbd_image}")
@@ -281,33 +280,34 @@ class Auto(BaseExecutor):
                 failed_rbds.append((rbd_image, "마운트 실패"))
                 continue
 
-            # tar 파일 복사
-            dest_path = f"{mounted_path}/{tar_filename}"
-            cp_result = self._run(["sudo", "cp", tar_path, dest_path])
-            if cp_result.returncode != 0:
-                self.log_error(f"    tar 복사 실패")
-                failed_rbds.append((rbd_image, "tar 복사 실패"))
+            # Docker root 변경 (--containerd 없이 → 자체 containerd 사용)
+            if not self._change_docker_root(mounted_path):
+                self.log_error(f"    Docker root 변경 실패")
+                failed_rbds.append((rbd_image, "Docker root 변경 실패"))
                 continue
 
-            # 복사 검증: 파일 크기 비교
-            dest_size = self._run(["sudo", "du", "-b", dest_path])
-            src_size = self._run(["du", "-b", tar_path])
-            if dest_size.returncode == 0 and src_size.returncode == 0:
-                d = dest_size.stdout.split()[0]
-                s = src_size.stdout.split()[0]
-                if d != s:
-                    self.log_error(f"    복사 검증 실패: 원본={s}B, 복사본={d}B")
-                    failed_rbds.append((rbd_image, "복사 검증 실패"))
-                    continue
+            # docker load
+            self.log_info(f"    docker load 중...")
+            load_result = self._run(["docker", "load", "-i", tar_path], capture_output=False)
+            if load_result.returncode != 0:
+                self.log_error(f"    docker load 실패")
+                failed_rbds.append((rbd_image, "docker load 실패"))
+                continue
 
-            self.log_success(f"    ✓ {dest_path} 복사 완료")
+            # 검증: RBD에 실제 데이터가 기록되었는지 확인
+            docker_root = f"{mounted_path}/root/docker"
+            du_result = self._run(["sudo", "du", "-sh", docker_root])
+            if du_result.returncode == 0:
+                usage = du_result.stdout.split()[0]
+                self.log_success(f"    ✓ docker load 완료 (Docker root 사용량: {usage})")
+            else:
+                self.log_success(f"    ✓ docker load 완료")
+
             completed_rbds.append(rbd_image)
 
-            # 언마운트 + 언맵
-            self._run(["sudo", "umount", "-l", mounted_path])
-            device_path = self._find_rbd_device(pool, rbd_image)
-            if device_path:
-                self._run(["sudo", "rbd", "unmap", device_path])
+        # Docker 기본 설정 복원
+        self.log_info("\n--- Docker 기본 설정 복원 ---")
+        self.docker._change_docker_root_directory("/var/lib/docker")
 
         # /tmp tar 파일 정리
         self._run(["rm", "-f", tar_path])
@@ -323,10 +323,6 @@ class Auto(BaseExecutor):
             self.log_error(f"실패: {len(failed_rbds)}/{len(rbd_images)}개 RBD")
             for img, reason in failed_rbds:
                 self.log_error(f"  ✗ {pool}/{img}: {reason}")
-
-        if completed_rbds:
-            self.log_info(f"\n대상 노드에서 RBD 마운트 후 아래 명령으로 이미지를 로드하세요:")
-            self.log_info(f"  docker load -i <마운트경로>/{tar_filename}")
 
     def _map_rbd_image(self, pool: str, image: str) -> bool:
         """RBD 이미지를 매핑합니다. 이미 매핑된 경우 스킵합니다."""
