@@ -217,131 +217,116 @@ class Auto(BaseExecutor):
         self.log_info(f"Docker 이미지 ({len(docker_images)}개):")
         for img in docker_images:
             self.log_info(f"  - {img}")
-        
+
         self.log_info(f"\nRBD Pool: {pool}")
         self.log_info(f"대상 RBD 이미지 ({len(rbd_images)}개):")
         for img in rbd_images:
             self.log_info(f"  - {img}")
-        
-        self.log_warning(f"총 {len(docker_images)} × {len(rbd_images)} = {len(docker_images) * len(rbd_images)}번의 배포가 실행됩니다.")
-        
+
+        self.log_info(f"\n방식: docker pull → docker save → 각 RBD에 tar 복사")
+
         return inquirer.confirm("배포를 시작하시겠습니까?", default=False)
 
     def _execute_deployment(self, docker_images: List[str], pool: str, rbd_images: List[str]) -> None:
         """실제 배포를 실행합니다.
-        첫 번째 RBD에서 docker pull 후 save, 나머지 RBD에는 load로 배포합니다."""
+        docker pull → docker save → 각 RBD에 tar 파일을 직접 복사합니다.
+        Docker root 변경 없이 파일시스템 복사로 확실하게 배포합니다."""
         self.log_info("\n=== 배포 실행 시작 ===")
-
-        success_count = 0
-        failed_tasks = []
-        completed_rbd_images = []
-        partial_rbd_images = []
         tar_path = "/tmp/storage-helper-images.tar"
+        tar_filename = "docker-images.tar"
+        failed_rbds = []
+        completed_rbds = []
 
-        # === Phase 1: 첫 번째 RBD에 pull + save ===
-        first_rbd = rbd_images[0]
-        self.log_info(f"\n--- Phase 1: {pool}/{first_rbd}에 이미지 pull ---")
-
-        mounted_path = self._prepare_rbd(pool, first_rbd, failed_tasks, docker_images)
-        if not mounted_path:
-            self.log_error("첫 번째 RBD 준비 실패, 배포를 중단합니다.")
-            self._show_deployment_summary(len(docker_images) * len(rbd_images), 0, failed_tasks, pool, [], [])
-            return
-
-        # Docker Root Directory 변경
-        if not self._change_docker_root(mounted_path):
-            self.log_error(f"Docker Root Directory 변경 실패: {mounted_path}")
-            failed_tasks.extend([(img, first_rbd, "Docker 설정 실패") for img in docker_images])
-            self._show_deployment_summary(len(docker_images) * len(rbd_images), 0, failed_tasks, pool, [], [])
-            return
-
-        # Docker 이미지 pull
+        # === Phase 1: Docker 이미지 pull ===
+        self.log_info("\n--- Phase 1: Docker 이미지 다운로드 ---")
         pulled_images = []
         for i, docker_image in enumerate(docker_images, 1):
             self.log_info(f"  [{i}/{len(docker_images)}] {docker_image} pull 중...")
             if self._pull_docker_image(docker_image):
                 self.log_success(f"  ✓ {docker_image} 완료")
                 pulled_images.append(docker_image)
-                success_count += 1
             else:
                 self.log_error(f"  ✗ {docker_image} 실패")
-                failed_tasks.append((docker_image, first_rbd, "pull 실패"))
 
         if not pulled_images:
             self.log_error("pull된 이미지가 없어 배포를 중단합니다.")
-            self._show_deployment_summary(len(docker_images) * len(rbd_images), 0, failed_tasks, pool, [], [])
             return
 
-        completed_rbd_images.append(first_rbd)
+        # === Phase 2: docker save ===
+        self.log_info(f"\n--- Phase 2: docker save ({len(pulled_images)}개 이미지) ---")
+        save_result = self._run(["docker", "save", "-o", tar_path] + pulled_images, capture_output=False)
+        if save_result.returncode != 0:
+            self.log_error("docker save 실패, 배포를 중단합니다.")
+            return
 
-        # 나머지 RBD가 있으면 save
-        remaining_rbds = rbd_images[1:]
-        if remaining_rbds:
-            self.log_info(f"\n  docker save로 {len(pulled_images)}개 이미지 저장 중...")
-            save_result = self._run(["docker", "save", "-o", tar_path] + pulled_images)
-            if save_result.returncode != 0:
-                self.log_error("docker save 실패, 나머지 RBD에는 개별 pull로 진행합니다.")
-                tar_path = None
+        # tar 파일 크기 확인
+        size_result = self._run(["du", "-h", tar_path])
+        if size_result.returncode == 0:
+            self.log_success(f"  tar 파일 생성 완료: {size_result.stdout.split()[0]}")
 
-        # === Phase 2: 나머지 RBD에 load ===
-        for idx, rbd_image in enumerate(remaining_rbds, 2):
-            self.log_info(f"\n--- Phase 2: [{idx}/{len(rbd_images)}] {pool}/{rbd_image} 배포 ---")
+        # === Phase 3: 각 RBD에 tar 파일 복사 ===
+        self.log_info(f"\n--- Phase 3: {len(rbd_images)}개 RBD에 배포 ---")
+        for i, rbd_image in enumerate(rbd_images, 1):
+            self.log_info(f"\n  [{i}/{len(rbd_images)}] {pool}/{rbd_image}")
 
-            mounted_path = self._prepare_rbd(pool, rbd_image, failed_tasks, docker_images)
+            # RBD 매핑 + 마운트
+            if not self._map_rbd_image(pool, rbd_image):
+                self.log_error(f"    RBD 매핑 실패")
+                failed_rbds.append((rbd_image, "RBD 매핑 실패"))
+                continue
+
+            mounted_path = self._mount_rbd_image(pool, rbd_image)
             if not mounted_path:
+                self.log_error(f"    마운트 실패")
+                failed_rbds.append((rbd_image, "마운트 실패"))
                 continue
 
-            # Docker Root Directory 변경
-            if not self._change_docker_root(mounted_path):
-                self.log_error(f"Docker Root Directory 변경 실패: {mounted_path}")
-                failed_tasks.extend([(img, rbd_image, "Docker 설정 실패") for img in docker_images])
+            # tar 파일 복사
+            dest_path = f"{mounted_path}/{tar_filename}"
+            cp_result = self._run(["sudo", "cp", tar_path, dest_path])
+            if cp_result.returncode != 0:
+                self.log_error(f"    tar 복사 실패")
+                failed_rbds.append((rbd_image, "tar 복사 실패"))
                 continue
 
-            # load 또는 pull
-            if tar_path:
-                self.log_info(f"  docker load로 이미지 로드 중...")
-                load_result = self._run(["docker", "load", "-i", tar_path], capture_output=False)
-                if load_result.returncode == 0:
-                    self.log_success(f"  ✓ {len(pulled_images)}개 이미지 로드 완료")
-                    success_count += len(pulled_images)
-                    completed_rbd_images.append(rbd_image)
-                else:
-                    self.log_error(f"  docker load 실패, 개별 pull로 전환합니다.")
-                    self._fallback_pull(docker_images, rbd_image, failed_tasks)
-            else:
-                self._fallback_pull(docker_images, rbd_image, failed_tasks)
+            # 복사 검증: 파일 크기 비교
+            dest_size = self._run(["sudo", "du", "-b", dest_path])
+            src_size = self._run(["du", "-b", tar_path])
+            if dest_size.returncode == 0 and src_size.returncode == 0:
+                d = dest_size.stdout.split()[0]
+                s = src_size.stdout.split()[0]
+                if d != s:
+                    self.log_error(f"    복사 검증 실패: 원본={s}B, 복사본={d}B")
+                    failed_rbds.append((rbd_image, "복사 검증 실패"))
+                    continue
 
-        # tar 파일 정리
-        if tar_path:
-            self._run(["rm", "-f", tar_path])
+            self.log_success(f"    ✓ {dest_path} 복사 완료")
+            completed_rbds.append(rbd_image)
 
-        # 결과 요약
-        total_tasks = len(docker_images) * len(rbd_images)
-        self._show_deployment_summary(total_tasks, success_count, failed_tasks, pool, completed_rbd_images, partial_rbd_images)
+            # 언마운트 + 언맵
+            self._run(["sudo", "umount", "-l", mounted_path])
+            device_path = self._find_rbd_device(pool, rbd_image)
+            if device_path:
+                self._run(["sudo", "rbd", "unmap", device_path])
 
-    def _prepare_rbd(self, pool: str, rbd_image: str, failed_tasks: list, docker_images: list) -> str:
-        """RBD를 매핑하고 마운트합니다. 실패 시 빈 문자열을 반환합니다."""
-        if not self._map_rbd_image(pool, rbd_image):
-            self.log_error(f"RBD 매핑 실패: {pool}/{rbd_image}")
-            failed_tasks.extend([(img, rbd_image, "RBD 매핑 실패") for img in docker_images])
-            return ""
+        # /tmp tar 파일 정리
+        self._run(["rm", "-f", tar_path])
 
-        mounted_path = self._mount_rbd_image(pool, rbd_image)
-        if not mounted_path:
-            self.log_error(f"마운트 실패: {pool}/{rbd_image}")
-            failed_tasks.extend([(img, rbd_image, "마운트 실패") for img in docker_images])
-            return ""
+        # === 결과 요약 ===
+        self.log_info("\n=== 배포 결과 요약 ===")
+        self.log_success(f"성공: {len(completed_rbds)}/{len(rbd_images)}개 RBD")
+        if completed_rbds:
+            for img in completed_rbds:
+                self.log_success(f"  ✓ {pool}/{img}")
 
-        return mounted_path
+        if failed_rbds:
+            self.log_error(f"실패: {len(failed_rbds)}/{len(rbd_images)}개 RBD")
+            for img, reason in failed_rbds:
+                self.log_error(f"  ✗ {pool}/{img}: {reason}")
 
-    def _fallback_pull(self, docker_images: list, rbd_image: str, failed_tasks: list) -> None:
-        """docker load 실패 시 개별 pull로 폴백합니다."""
-        for docker_image in docker_images:
-            if self._pull_docker_image(docker_image):
-                self.log_success(f"  ✓ {docker_image} pull 완료")
-            else:
-                self.log_error(f"  ✗ {docker_image} pull 실패")
-                failed_tasks.append((docker_image, rbd_image, "pull 실패"))
+        if completed_rbds:
+            self.log_info(f"\n대상 노드에서 RBD 마운트 후 아래 명령으로 이미지를 로드하세요:")
+            self.log_info(f"  docker load -i <마운트경로>/{tar_filename}")
 
     def _map_rbd_image(self, pool: str, image: str) -> bool:
         """RBD 이미지를 매핑합니다. 이미 매핑된 경우 스킵합니다."""
@@ -459,27 +444,6 @@ class Auto(BaseExecutor):
         result = self._run(["docker", "pull", image], capture_output=False)
         return result.returncode == 0
 
-
-    def _show_deployment_summary(self, total: int, success: int, failed_tasks: List[Tuple[str, str, str]],
-                                   pool: str = "", completed: List[str] = None, partial: List[str] = None) -> None:
-        """배포 결과 요약을 표시합니다."""
-        self.log_info("\n=== 배포 결과 요약 ===")
-        self.log_success(f"성공: {success}/{total}")
-
-        if completed:
-            self.log_success(f"완료된 RBD 이미지 ({len(completed)}개):")
-            for img in completed:
-                self.log_success(f"  ✓ {pool}/{img}")
-
-        if partial:
-            self.log_warning(f"부분 완료된 RBD 이미지 ({len(partial)}개) — 수동 확인 필요:")
-            for img in partial:
-                self.log_warning(f"  △ {pool}/{img}")
-
-        if failed_tasks:
-            self.log_error(f"실패: {len(failed_tasks)}/{total}")
-            for docker_img, rbd_img, reason in failed_tasks:
-                self.log_error(f"  - {docker_img} -> {rbd_img}: {reason}")
 
     def format_filesystem(self) -> None:
         """RBD 파일시스템을 자동 초기화합니다."""
