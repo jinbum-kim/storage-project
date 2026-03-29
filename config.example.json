@@ -1,9 +1,8 @@
 {
     "favorite": {
-        "category_name": [
+        "pc_cafe": [
             "registry.example.com/org/image-a:v1.0.0",
-            "registry.example.com/org/image-b:v2.0.0",
-            "docker.io/library/nginx:latest"
+            "registry.example.com/org/image-b:v2.0.0"
         ]
     }
 }
